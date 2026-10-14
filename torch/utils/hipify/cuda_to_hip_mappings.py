@@ -2739,6 +2739,8 @@ CUDA_IDENTIFIER_MAP = collections.OrderedDict([
     ("nvmlGpuP2PCapsIndex_t", "uint32_t"),
     ("cuFileRead", "hipFileRead"),
     ("cuFileWrite", "hipFileWrite"),
+    ("cuFileReadAsync", "hipFileReadAsync"),
+    ("cuFileWriteAsync", "hipFileWriteAsync"),
     ("cuFileBufRegister", "hipFileBufRegister"),
     ("cuFileBufDeregister", "hipFileBufDeregister"),
     ("cuFileHandleRegister", "hipFileHandleRegister"),
