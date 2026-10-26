@@ -65,57 +65,72 @@ void libkineto_init(bool cpuOnly, [[maybe_unused]] bool logOnError) {
     SET_LOG_SEVERITY_LEVEL(atoi(logLevelEnv));
   }
 
+  static bool registeredCpuOnly = false;
+  auto& api = libkineto::api();
+  // A CPU-only libkineto_init may be followed by a GPU one. Before init, the
+  // GPU call swaps in a GPU profiler; after init, it only adds the GPU child
+  // profilers.
+  const bool upgradeToGpu = registeredCpuOnly && !cpuOnly;
+  if (api.isProfilerRegistered() && !upgradeToGpu) {
+    VLOG(0) << "Ignoring repeated profiler registration, cpuOnly = " << cpuOnly;
+  } else {
+    registeredCpuOnly = cpuOnly;
 #if __linux__
-  // KINETO_USE_DAEMON selects the OSS IPC loader only when the platform has
-  // not already registered its own loader.
-  const bool registerOssDaemon = libkineto::isDaemonEnvVarSet() &&
-      !ConfigLoader::hasDaemonConfigLoaderFactory();
-  if (registerOssDaemon) {
-    LOG(INFO) << "Registering daemon config loader, cpuOnly = " << cpuOnly;
-    DaemonConfigLoader::registerFactory();
-  }
+    // KINETO_USE_DAEMON selects the OSS IPC loader only when the platform has
+    // not already registered its own loader.
+    if (libkineto::isDaemonEnvVarSet() &&
+        !ConfigLoader::hasDaemonConfigLoaderFactory()) {
+      LOG(INFO) << "Registering daemon config loader, cpuOnly = " << cpuOnly;
+      DaemonConfigLoader::registerFactory();
+    }
 #endif
 
+    LOG_IF(WARNING, api.isProfilerInitialized())
+        << "Detected GPU libkineto_init after CPU-only init; CUPTI/ROCm "
+           "profiling stays disabled. Call libkineto_init once in the "
+           "intended mode.";
+    if (!api.isProfilerInitialized()) {
 #ifdef HAS_CUPTI
-  if (!cpuOnly && shouldPreloadCuptiInstrumentation()) {
-    CuptiActivityApi::forceLoadCupti();
-  }
+      if (!cpuOnly && shouldPreloadCuptiInstrumentation()) {
+        CuptiActivityApi::forceLoadCupti();
+      }
 #endif // HAS_CUPTI
 
 #ifdef HAS_ROCTRACER
-  if (!cpuOnly) {
-    RocprofLogger::ensureRegistered();
-  }
+      if (!cpuOnly) {
+        RocprofLogger::ensureRegistered();
+      }
 #endif
 
-  auto& api = libkineto::api();
-  ConfigLoader& config_loader = api.configLoader();
-  api.registerProfiler(
-      std::make_unique<ActivityProfilerProxy>(cpuOnly, config_loader));
+      ConfigLoader& config_loader = api.configLoader();
+      api.registerProfiler(
+          std::make_unique<ActivityProfilerProxy>(cpuOnly, config_loader));
+    }
 
 #ifdef HAS_CUPTI_PM_SAMPLING
-  if (!cpuOnly) {
-    libkineto::api().registerProfilerFactory(
-        []() -> std::unique_ptr<IActivityProfiler> {
-          return std::make_unique<CuptiPMSamplingProfiler>();
-        });
-  }
+    if (!cpuOnly) {
+      libkineto::api().registerProfilerFactory(
+          []() -> std::unique_ptr<IActivityProfiler> {
+            return std::make_unique<CuptiPMSamplingProfiler>();
+          });
+    }
 #endif
 
 #ifdef HAS_XPUPTI
-  if (!cpuOnly) {
-    api.registerProfilerFactory([]() -> std::unique_ptr<IActivityProfiler> {
-      XPUPTI_CALL(
-          ptiViewGPULocalAvailable(),
-          /*error_message=*/"Failed to enable Kineto Profiler on XPU.");
-      XpuptiScopeProfilerConfig::registerFactory();
-      return std::make_unique<XPUActivityProfiler>();
-    });
-  }
+    if (!cpuOnly) {
+      api.registerProfilerFactory([]() -> std::unique_ptr<IActivityProfiler> {
+        XPUPTI_CALL(
+            ptiViewGPULocalAvailable(),
+            /*error_message=*/"Failed to enable Kineto Profiler on XPU.");
+        XpuptiScopeProfilerConfig::registerFactory();
+        return std::make_unique<XPUActivityProfiler>();
+      });
+    }
 #endif // HAS_XPUPTI
+  }
 
 #if __linux__
-  if (registerOssDaemon) {
+  if (libkineto::isDaemonEnvVarSet()) {
     api.initProfilerIfRegistered();
     VLOG(0) << "libkineto profilers activated";
   }
