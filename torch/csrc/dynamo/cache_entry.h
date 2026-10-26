@@ -7,6 +7,7 @@
 #include <torch/csrc/dynamo/utils.h>
 #include <torch/csrc/utils/pybind.h>
 #include <list>
+#include <vector>
 
 extern "C" {
 
@@ -50,6 +51,8 @@ typedef struct VISIBILITY_HIDDEN CacheEntry {
   py::object compile_id;
   // root guard manager if exists
   void* root_mgr{nullptr};
+  // owner of diff_guard_root_mgr; reassigned by update_diff_guard_root_manager
+  py::object diff_guard_root;
   // diff guard root guard manager if exists
   void* diff_guard_root_mgr{nullptr};
   // backend used to create this cache entry
@@ -64,17 +67,22 @@ typedef struct VISIBILITY_HIDDEN CacheEntry {
   int64_t _isolate_recompiles_id{-1};
   // Reference to string representation of the CompileContext
   std::string trace_annotation;
+  // Unique across all entries ever created, so a snapshot can find its live
+  // entry again even if another entry shares its guard manager.
+  uint64_t serial;
 
   CacheEntry(const py::handle& guarded_code, PyObject* backend);
   CacheEntry(const CacheEntry&) = default;
   CacheEntry(CacheEntry&&) = default;
   CacheEntry& operator=(const CacheEntry&) = default;
   CacheEntry& operator=(CacheEntry&&) = default;
-  ~CacheEntry();
 
-  void invalidate(py::object deleted_guard_manager);
-  // Called from the python side to update the diff guard root manager
-  void update_diff_guard_root_manager();
+  // Leaves this entry matching nothing.  Dropping the references it held can
+  // run Python, so they are moved into released for the caller to drop outside
+  // the critical section.
+  void invalidate(
+      py::object deleted_guard_manager,
+      std::vector<py::object>& released);
   // A copy that owns its references and does not belong to the cache.  The
   // non-owning pointers into the cache and guard managers are cleared.
   CacheEntry copy_for_python() const;
