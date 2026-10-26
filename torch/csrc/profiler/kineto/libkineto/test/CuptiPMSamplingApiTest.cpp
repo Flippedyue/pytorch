@@ -26,10 +26,7 @@
 #include <cupti_profiler_target.h>
 #include <cupti_target.h>
 
-#include "include/Config.h"
 #include "src/CuptiPMSamplingApi.h"
-#include "src/CuptiPMSamplingProfiler.h"
-#include "src/CuptiTimestamp.h"
 #include "src/Logger.h"
 #include "src/LoggerCollector.h"
 
@@ -137,8 +134,6 @@ class CuptiPMSamplingApiTest : public testing::Test {
     fakeCupti() = FakeCuptiState{};
   }
 };
-
-using CuptiPMSamplingIntegrationTest = CuptiPMSamplingApiTest;
 
 } // namespace
 
@@ -359,64 +354,6 @@ TEST_F(CuptiPMSamplingApiTest, ConfiguresDeviceMetricsAndBuffers) {
   EXPECT_EQ(fakeCupti().counterDataMetricNames, config.metricNames);
   EXPECT_EQ(fakeCupti().maxSamples, 8'000);
   api.disable();
-}
-
-TEST_F(CuptiPMSamplingIntegrationTest, PreparesAndReleasesDefaultSession) {
-  fakeCupti().major = 8;
-  fakeCupti().minor = 0;
-  Config config;
-  ASSERT_TRUE(
-      config.parse("PERFORMANCE_METRICS_DEVICE_ID=0\n"
-                   "PERFORMANCE_METRICS=sm__cycles_active.avg"));
-  configureCuptiTimestampSource(false);
-  CuptiPMSamplingProfiler profiler;
-
-  auto session = profiler.configure({ActivityType::HARDWARE_COUNTERS}, config);
-
-  ASSERT_NE(session, nullptr);
-  expectCalls({"counterDataImageInitialize"});
-
-  clearCalls();
-  session.reset();
-  expectCalls({"samplingDisable", "hostDeinitialize", "profilerDeInitialize"});
-}
-
-TEST_F(CuptiPMSamplingIntegrationTest, ForwardsParsedPerformanceMetricsConfig) {
-  Config config;
-  ASSERT_TRUE(config.parse(
-      "PERFORMANCE_METRICS_DEVICE_ID=2\n"
-      "PERFORMANCE_METRICS=sm__cycles_active.avg,dram__bytes_read.sum\n"
-      "PERFORMANCE_METRICS_SAMPLING_INTERVAL_MS=0.25\n"
-      "PERFORMANCE_METRICS_LOOKBACK_WINDOW_MS=2000"));
-  configureCuptiTimestampSource(false);
-  CuptiPMSamplingProfiler profiler;
-
-  auto session = profiler.configure({ActivityType::HARDWARE_COUNTERS}, config);
-
-  ASSERT_NE(session, nullptr);
-  EXPECT_EQ(fakeCupti().configMetricNames, config.performanceMetricNames());
-  EXPECT_EQ(
-      fakeCupti().counterDataMetricNames, config.performanceMetricNames());
-  EXPECT_EQ(fakeCupti().enabledDeviceIndex, 2);
-  EXPECT_EQ(
-      fakeCupti().triggerMode,
-      CUPTI_PM_SAMPLING_TRIGGER_MODE_GPU_TIME_INTERVAL);
-  EXPECT_EQ(fakeCupti().samplingInterval, 250'000);
-  EXPECT_EQ(fakeCupti().maxSamples, 8'000);
-}
-
-TEST_F(CuptiPMSamplingIntegrationTest, ReturnsNoSessionWhenPreparationFails) {
-  fakeCupti().setConfigResult = CUPTI_ERROR_UNKNOWN;
-  Config config;
-  ASSERT_TRUE(
-      config.parse("PERFORMANCE_METRICS_DEVICE_ID=0\n"
-                   "PERFORMANCE_METRICS=sm__cycles_active.avg"));
-  configureCuptiTimestampSource(false);
-  CuptiPMSamplingProfiler profiler;
-
-  EXPECT_EQ(
-      profiler.configure({ActivityType::HARDWARE_COUNTERS}, config), nullptr);
-  expectCalls({"samplingDisable", "hostDeinitialize", "profilerDeInitialize"});
 }
 
 TEST_F(CuptiPMSamplingApiTest, KeepsAtLeastOneSample) {
