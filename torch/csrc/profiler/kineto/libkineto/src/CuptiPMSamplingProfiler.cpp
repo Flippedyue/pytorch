@@ -30,11 +30,6 @@ const std::set<libkineto::ActivityType> kSupportedActivities{
 } // namespace
 
 CuptiPMSamplingSession::CuptiPMSamplingSession(
-    const CuptiPMSamplingConfig& config)
-    : CuptiPMSamplingSession(
-          std::make_unique<CuptiPMSamplingController>(config)) {}
-
-CuptiPMSamplingSession::CuptiPMSamplingSession(
     std::unique_ptr<ICuptiPMSamplingController> controller)
     : controller_(std::move(controller)) {}
 
@@ -172,6 +167,15 @@ std::unique_ptr<libkineto::CpuTraceBuffer> CuptiPMSamplingSession::
   return buffer;
 }
 
+CuptiPMSamplingProfiler::CuptiPMSamplingProfiler()
+    : CuptiPMSamplingProfiler([](const CuptiPMSamplingConfig& config) {
+        return std::make_unique<CuptiPMSamplingController>(config);
+      }) {}
+
+CuptiPMSamplingProfiler::CuptiPMSamplingProfiler(
+    ControllerFactory controllerFactory)
+    : controllerFactory_(std::move(controllerFactory)) {}
+
 const std::string& CuptiPMSamplingProfiler::name() const {
   return kProfilerName;
 }
@@ -202,7 +206,8 @@ std::unique_ptr<libkineto::IActivityProfilerSession> CuptiPMSamplingProfiler::
       metricNames,
       config.performanceMetricsSamplingInterval(),
       config.performanceMetricsLookbackWindow()};
-  auto session = std::make_unique<CuptiPMSamplingSession>(pmConfig);
+  auto session = std::make_unique<CuptiPMSamplingSession>(
+      controllerFactory_(pmConfig));
   if (!session->prepare()) {
     return nullptr;
   }

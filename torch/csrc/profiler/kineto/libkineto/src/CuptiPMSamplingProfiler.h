@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -27,7 +28,6 @@ namespace KINETO_NAMESPACE {
 class CuptiPMSamplingSession final
     : public libkineto::IActivityProfilerSession {
  public:
-  explicit CuptiPMSamplingSession(const CuptiPMSamplingConfig& config);
   explicit CuptiPMSamplingSession(
       std::unique_ptr<ICuptiPMSamplingController> controller);
   ~CuptiPMSamplingSession() override;
@@ -60,6 +60,13 @@ class CuptiPMSamplingSession final
 // IActivityProfiler, so this is the simplest way to introduce a new profiler.
 class CuptiPMSamplingProfiler final : public libkineto::IActivityProfiler {
  public:
+  using ControllerFactory =
+      std::function<std::unique_ptr<ICuptiPMSamplingController>(
+          const CuptiPMSamplingConfig&)>;
+
+  CuptiPMSamplingProfiler();
+  explicit CuptiPMSamplingProfiler(ControllerFactory controllerFactory);
+
   [[nodiscard]] const std::string& name() const override;
   [[nodiscard]] const std::set<libkineto::ActivityType>& availableActivities()
       const override;
@@ -71,6 +78,9 @@ class CuptiPMSamplingProfiler final : public libkineto::IActivityProfiler {
       int64_t durationMs,
       const std::set<libkineto::ActivityType>& activityTypes,
       const libkineto::Config& config) override;
+
+ private:
+  ControllerFactory controllerFactory_;
 };
 
 } // namespace KINETO_NAMESPACE

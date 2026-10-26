@@ -147,6 +147,18 @@ target_include_directories(CuptiPMSamplingApiTest PRIVATE
     "${LIBKINETO_DIR}/src")
 gtest_discover_tests(CuptiPMSamplingApiTest)
 
+# CuptiPMSamplingControllerTest
+add_executable(CuptiPMSamplingControllerTest
+    CuptiPMSamplingControllerTest.cpp)
+target_link_libraries(CuptiPMSamplingControllerTest PRIVATE
+    gtest_main
+    kineto_base kineto_api)
+target_include_directories(CuptiPMSamplingControllerTest PRIVATE
+    "${LIBKINETO_DIR}"
+    "${LIBKINETO_DIR}/include"
+    "${LIBKINETO_DIR}/src")
+gtest_discover_tests(CuptiPMSamplingControllerTest)
+
 # CuptiPMSamplingProfilerTest
 add_executable(CuptiPMSamplingProfilerTest
     CuptiPMSamplingProfilerTest.cpp)
