@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "src/CuptiPMSamplingController.h"
+#include "src/ThrowUtil.h"
 
 using namespace KINETO_NAMESPACE;
 using namespace std::chrono_literals;
@@ -47,7 +48,7 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
     ++calls_.configureCalls;
     receivedConfig = config;
     if (failConfiguration) {
-      throw std::runtime_error("PM sampling configuration failed");
+      KINETO_THROW(std::runtime_error, "PM sampling configuration failed");
     }
   }
 
@@ -56,7 +57,7 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
     ++calls_.startCalls;
     stopped_ = false;
     if (failStart) {
-      throw std::runtime_error("PM sampling start failed");
+      KINETO_THROW(std::runtime_error, "PM sampling start failed");
     }
   }
 
@@ -70,7 +71,7 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
     std::deque<DecodeBatch>& batches = stopped_ ? drainBatches : runningBatches;
     // Allow samples to accumulate before a scripted worker failure.
     if ((failDecode && batches.empty()) || (stopped_ && failDrain)) {
-      throw std::runtime_error("PM sampling decode failed");
+      KINETO_THROW(std::runtime_error, "PM sampling decode failed");
     }
     if (batches.empty()) {
       return true;
@@ -87,7 +88,7 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
     ++calls_.stopCalls;
     stopped_ = true;
     if (failStop) {
-      throw std::runtime_error("PM sampling stop failed");
+      KINETO_THROW(std::runtime_error, "PM sampling stop failed");
     }
   }
 
