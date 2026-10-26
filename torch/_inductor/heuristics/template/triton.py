@@ -3228,9 +3228,10 @@ class BaseScaledMMConfigMixin(MMTemplateConfigMixin):
         from ...lowering import lowerings as L
 
         aten = torch.ops.aten
-        if bias and len(mat_b.get_size()) == len(bias.get_size()) + 1:
-            # Need to unsqueeze bias from [N] -> [1, N]
-            bias = L[aten.unsqueeze](bias, 0)
+        if bias:
+            # Eager reads any N-element bias ([N], [N, 1], [1, 1, N], ...) as a
+            # flat vector added across columns; the template indexes it as [1, N].
+            bias = L[aten.reshape](bias, [1, mat_b.get_size()[-1]])
 
         def is_tensorwise_scale(scale: IRNode) -> bool:
             size = scale.get_size()
