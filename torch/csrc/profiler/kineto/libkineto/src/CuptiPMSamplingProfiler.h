@@ -27,6 +27,7 @@ namespace KINETO_NAMESPACE {
 class CuptiPMSamplingSession final
     : public libkineto::IActivityProfilerSession {
  public:
+  explicit CuptiPMSamplingSession(const CuptiPMSamplingConfig& config);
   explicit CuptiPMSamplingSession(
       std::unique_ptr<ICuptiPMSamplingController> controller);
   ~CuptiPMSamplingSession() override;

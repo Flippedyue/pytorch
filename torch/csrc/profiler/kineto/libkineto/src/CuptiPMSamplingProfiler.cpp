@@ -30,6 +30,11 @@ const std::set<libkineto::ActivityType> kSupportedActivities{
 } // namespace
 
 CuptiPMSamplingSession::CuptiPMSamplingSession(
+    const CuptiPMSamplingConfig& config)
+    : CuptiPMSamplingSession(
+          std::make_unique<CuptiPMSamplingController>(config)) {}
+
+CuptiPMSamplingSession::CuptiPMSamplingSession(
     std::unique_ptr<ICuptiPMSamplingController> controller)
     : controller_(std::move(controller)) {}
 
@@ -197,8 +202,7 @@ std::unique_ptr<libkineto::IActivityProfilerSession> CuptiPMSamplingProfiler::
       metricNames,
       config.performanceMetricsSamplingInterval(),
       config.performanceMetricsLookbackWindow()};
-  auto session = std::make_unique<CuptiPMSamplingSession>(
-      std::make_unique<CuptiPMSamplingController>(pmConfig));
+  auto session = std::make_unique<CuptiPMSamplingSession>(pmConfig);
   if (!session->prepare()) {
     return nullptr;
   }

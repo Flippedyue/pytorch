@@ -128,6 +128,11 @@ const CuptiPMSamplingConfig kConfig{0, {"sm__cycles_active.avg"}, 1ms, 1s};
 
 } // namespace
 
+TEST(CuptiPMSamplingControllerTest, RejectsNullApi) {
+  EXPECT_THROW(
+      CuptiPMSamplingController(kConfig, nullptr), std::invalid_argument);
+}
+
 TEST(CuptiPMSamplingControllerTest, ForwardsConfigurationToApi) {
   const std::vector<CuptiPMSamplingConfig> configs{
       {2, {"sm__cycles_active.avg", "dram__bytes_read.sum"}, std::nullopt, 2s},
@@ -209,6 +214,47 @@ TEST(CuptiPMSamplingControllerTest, RejectsPreparationUntilStopped) {
   EXPECT_EQ(calls.configureCalls, 2);
   EXPECT_FALSE(controller.stop());
   EXPECT_EQ(calls.disableCalls, 2);
+}
+
+TEST(CuptiPMSamplingControllerTest, IgnoresStartWhileActive) {
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
+  FakeCuptiPMSamplingApi& fakeApi = *api;
+  CuptiPMSamplingController controller(kConfig, std::move(api));
+
+  ASSERT_TRUE(controller.prepare());
+  controller.start();
+  EXPECT_TRUE(fakeApi.waitForDecodeCalls(1));
+  EXPECT_NO_THROW(controller.start());
+  EXPECT_TRUE(controller.stop());
+
+  EXPECT_EQ(calls.startCalls, 1);
+  EXPECT_EQ(calls.stopCalls, 1);
+  EXPECT_EQ(calls.drainCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 1);
+}
+
+TEST(CuptiPMSamplingControllerTest, RequiresPreparationToRestartAfterStop) {
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
+  FakeCuptiPMSamplingApi& fakeApi = *api;
+  CuptiPMSamplingController controller(kConfig, std::move(api));
+
+  ASSERT_TRUE(controller.prepare());
+  controller.start();
+  EXPECT_TRUE(fakeApi.waitForDecodeCalls(1));
+  EXPECT_TRUE(controller.stop());
+  const int decodeCalls = fakeApi.decodeCalls();
+
+  EXPECT_NO_THROW(controller.start());
+  EXPECT_FALSE(controller.stop());
+
+  EXPECT_EQ(calls.configureCalls, 1);
+  EXPECT_EQ(calls.startCalls, 1);
+  EXPECT_EQ(calls.stopCalls, 1);
+  EXPECT_EQ(calls.drainCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 1);
+  EXPECT_EQ(fakeApi.decodeCalls(), decodeCalls);
 }
 
 TEST(CuptiPMSamplingControllerTest, FiltersWorkerSamplesAndTransfersOwnership) {

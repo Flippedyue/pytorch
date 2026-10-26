@@ -138,6 +138,8 @@ class CuptiPMSamplingApiTest : public testing::Test {
   }
 };
 
+using CuptiPMSamplingIntegrationTest = CuptiPMSamplingApiTest;
+
 } // namespace
 
 // CUDA/CUPTI symbol overrides used by the tests below.
@@ -359,34 +361,27 @@ TEST_F(CuptiPMSamplingApiTest, ConfiguresDeviceMetricsAndBuffers) {
   api.disable();
 }
 
-TEST_F(CuptiPMSamplingApiTest, ConfiguresDefaultProfilerAndController) {
+TEST_F(CuptiPMSamplingIntegrationTest, PreparesAndReleasesDefaultSession) {
   fakeCupti().major = 8;
   fakeCupti().minor = 0;
   Config config;
-  ASSERT_TRUE(config.parse(
-      "PERFORMANCE_METRICS_DEVICE_ID=2\n"
-      "PERFORMANCE_METRICS=sm__cycles_active.avg,dram__bytes_read.sum\n"
-      "PERFORMANCE_METRICS_LOOKBACK_WINDOW_MS=2000"));
+  ASSERT_TRUE(
+      config.parse("PERFORMANCE_METRICS_DEVICE_ID=0\n"
+                   "PERFORMANCE_METRICS=sm__cycles_active.avg"));
   configureCuptiTimestampSource(false);
   CuptiPMSamplingProfiler profiler;
 
   auto session = profiler.configure({ActivityType::HARDWARE_COUNTERS}, config);
 
   ASSERT_NE(session, nullptr);
-  EXPECT_EQ(fakeCupti().configMetricNames, config.performanceMetricNames());
-  EXPECT_EQ(
-      fakeCupti().counterDataMetricNames, config.performanceMetricNames());
-  EXPECT_EQ(fakeCupti().enabledDeviceIndex, 2);
-  EXPECT_EQ(fakeCupti().clockRateDevice, 2);
-  EXPECT_EQ(fakeCupti().samplingInterval, 1'000'000);
-  EXPECT_EQ(fakeCupti().maxSamples, 3'000);
+  expectCalls({"counterDataImageInitialize"});
 
   clearCalls();
   session.reset();
   expectCalls({"samplingDisable", "hostDeinitialize", "profilerDeInitialize"});
 }
 
-TEST_F(CuptiPMSamplingApiTest, ForwardsParsedPerformanceMetricsConfig) {
+TEST_F(CuptiPMSamplingIntegrationTest, ForwardsParsedPerformanceMetricsConfig) {
   Config config;
   ASSERT_TRUE(config.parse(
       "PERFORMANCE_METRICS_DEVICE_ID=2\n"
@@ -410,7 +405,7 @@ TEST_F(CuptiPMSamplingApiTest, ForwardsParsedPerformanceMetricsConfig) {
   EXPECT_EQ(fakeCupti().maxSamples, 8'000);
 }
 
-TEST_F(CuptiPMSamplingApiTest, ReturnsNoSessionWhenPreparationFails) {
+TEST_F(CuptiPMSamplingIntegrationTest, ReturnsNoSessionWhenPreparationFails) {
   fakeCupti().setConfigResult = CUPTI_ERROR_UNKNOWN;
   Config config;
   ASSERT_TRUE(

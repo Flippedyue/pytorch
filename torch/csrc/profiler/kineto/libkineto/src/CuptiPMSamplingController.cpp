@@ -11,9 +11,11 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <stdexcept>
 #include <utility>
 
 #include "Logger.h"
+#include "ThrowUtil.h"
 
 /*
  * ======================== CUPTI PM SAMPLING CONTROLLER
@@ -48,7 +50,12 @@ CuptiPMSamplingController::CuptiPMSamplingController(
 CuptiPMSamplingController::CuptiPMSamplingController(
     CuptiPMSamplingConfig config,
     std::unique_ptr<ICuptiPMSamplingApi> api)
-    : config_(std::move(config)), api_(std::move(api)) {}
+    : config_(std::move(config)), api_(std::move(api)) {
+  if (!api_) {
+    KINETO_THROW(
+        std::invalid_argument, "CUPTI PM sampling requires a non-null API");
+  }
+}
 
 CuptiPMSamplingController::~CuptiPMSamplingController() {
   static_cast<void>(stop());
