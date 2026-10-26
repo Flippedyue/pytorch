@@ -412,7 +412,7 @@ TEST_F(CuptiPMSamplingApiTest, WarnsAndContinuesWithExplicitGa100Interval) {
   Logger::setSeverityLevel(LoggerOutputType::WARNING);
   Logger::addLoggerObserver(&collector);
 
-  api.configure(makeConfig(1ms));
+  EXPECT_NO_THROW(api.configure(makeConfig(1ms)));
 
   Logger::removeLoggerObserver(&collector);
   Logger::setSeverityLevel(previousSeverity);
