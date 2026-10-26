@@ -18,6 +18,7 @@ from torch._inductor.fx_passes.dedupe_symint_uses import _SymHashingDict
 from torch._inductor.fx_utils import get_node_storage
 from torch._inductor.utils import get_gpu_type
 from torch._library.utils import zip_schema
+from torch.fx.experimental.proxy_tensor import _coor_device_index_is_current
 from torch.fx.experimental.symbolic_shapes import (
     guard_or_false,
     guard_or_true,
@@ -34,10 +35,13 @@ from ..pattern_matcher import (
     CallFunction,
     Ignored,
     init_once_fakemode,
+    insert_current_device_node,
     KeywordArg,
     Match,
     MULTIPLE,
     PatternMatcherPass as PatternMatcherPassBase,
+    rank_agnostic,
+    rank_agnostic_passes,
     register_graph_pattern,
     stable_topological_sort,
 )
@@ -472,8 +476,11 @@ class UniformValueConstantFolder(ConstantFolder):
             if isinstance(out, torch.Tensor) and out.numel() == 1:
                 return out
 
-        # handle device_put op
-        if node.target == prims.device_put.default:
+        # handle device_put, and current_device since it feeds constructors' device
+        if node.target in (
+            prims.device_put.default,
+            torch.ops.coor.current_device.default,
+        ):
             return super(ConstantFolder, self).run_node(node)
 
         # constructors ops
@@ -487,7 +494,7 @@ class UniformValueConstantFolder(ConstantFolder):
             # Don't specialize symbolic value.
             if not isinstance(value, (torch.SymInt, torch.SymFloat, torch.SymBool)):
                 new_args = [[1], value]
-                return aten.full.default(*new_args, **node.kwargs)
+                return aten.full.default(*new_args, **kwargs)
 
         # handle before view ops because this changes value
         if node.target is aten.view.dtype:
@@ -621,6 +628,7 @@ def constant_fold_uniform_value(gm: torch.fx.GraphModule):
         node_replacements_shapes = cf.node_replacements_shapes
 
         graph = gm.graph
+        device_node = None
 
         zeros = OrderedSet[Any]()
         ones = OrderedSet[Any]()
@@ -689,6 +697,13 @@ def constant_fold_uniform_value(gm: torch.fx.GraphModule):
                 if _has_self_referential_shape(shapes, node):
                     continue
 
+                # Under compile-on-one-rank, don't bake the compiling rank's device.
+                device = fake_tensor.device
+                if rank_agnostic() and _coor_device_index_is_current(device):
+                    if device_node is None:
+                        device_node = insert_current_device_node(graph, device)
+                    device = device_node
+
                 # zeros and ones just get traced into full, so we insert those
                 new_node = graph.call_function(
                     aten.full.default,
@@ -696,7 +711,7 @@ def constant_fold_uniform_value(gm: torch.fx.GraphModule):
                     kwargs={
                         "dtype": fake_tensor.dtype,
                         "layout": torch.strided,
-                        "device": fake_tensor.device,
+                        "device": device,
                         "pin_memory": node.kwargs.get("pin_memory", False),
                     },
                 )
@@ -797,6 +812,7 @@ def canonicalize_aten_ir_passes(gm: torch.fx.GraphModule):
     canonicalize_quant_mapping(gm)
 
 
+@rank_agnostic_passes()
 def joint_graph_passes(
     graph: torch.fx.GraphModule,
     input_device: torch.device | None = None,
