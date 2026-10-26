@@ -40,7 +40,7 @@ class CuptiPMSamplingController final : public ICuptiPMSamplingController {
   explicit CuptiPMSamplingController(CuptiPMSamplingConfig config);
   CuptiPMSamplingController(
       CuptiPMSamplingConfig config,
-      std::unique_ptr<CuptiPMSamplingApi> api);
+      std::unique_ptr<ICuptiPMSamplingApi> api);
   CuptiPMSamplingController(const CuptiPMSamplingController&) = delete;
   CuptiPMSamplingController& operator=(const CuptiPMSamplingController&) =
       delete;
@@ -67,7 +67,7 @@ class CuptiPMSamplingController final : public ICuptiPMSamplingController {
   void logCurrentException(const char* fallback);
 
   CuptiPMSamplingConfig config_;
-  std::unique_ptr<CuptiPMSamplingApi> api_;
+  std::unique_ptr<ICuptiPMSamplingApi> api_;
   std::thread decodeThread_;
   std::atomic_bool stopRequested_{false};
   std::atomic_bool decodeFailed_{false};

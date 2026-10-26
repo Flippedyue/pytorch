@@ -26,7 +26,10 @@
 #include <cupti_profiler_target.h>
 #include <cupti_target.h>
 
+#include "include/Config.h"
 #include "src/CuptiPMSamplingApi.h"
+#include "src/CuptiPMSamplingProfiler.h"
+#include "src/CuptiTimestamp.h"
 #include "src/Logger.h"
 #include "src/LoggerCollector.h"
 
@@ -354,6 +357,32 @@ TEST_F(CuptiPMSamplingApiTest, ConfiguresDeviceMetricsAndBuffers) {
   EXPECT_EQ(fakeCupti().counterDataMetricNames, config.metricNames);
   EXPECT_EQ(fakeCupti().maxSamples, 8'000);
   api.disable();
+}
+
+TEST_F(CuptiPMSamplingApiTest, ConfiguresDefaultProfilerAndController) {
+  fakeCupti().major = 8;
+  fakeCupti().minor = 0;
+  Config config;
+  ASSERT_TRUE(config.parse(
+      "PERFORMANCE_METRICS_DEVICE_ID=2\n"
+      "PERFORMANCE_METRICS=sm__cycles_active.avg,dram__bytes_read.sum\n"
+      "PERFORMANCE_METRICS_LOOKBACK_WINDOW_MS=2000"));
+  configureCuptiTimestampSource(false);
+  CuptiPMSamplingProfiler profiler;
+
+  auto session = profiler.configure({ActivityType::HARDWARE_COUNTERS}, config);
+
+  ASSERT_NE(session, nullptr);
+  EXPECT_EQ(fakeCupti().configMetricNames, config.performanceMetricNames());
+  EXPECT_EQ(fakeCupti().counterDataMetricNames, config.performanceMetricNames());
+  EXPECT_EQ(fakeCupti().enabledDeviceIndex, 2);
+  EXPECT_EQ(fakeCupti().clockRateDevice, 2);
+  EXPECT_EQ(fakeCupti().samplingInterval, 1'000'000);
+  EXPECT_EQ(fakeCupti().maxSamples, 3'000);
+
+  clearCalls();
+  session.reset();
+  expectCalls({"samplingDisable", "hostDeinitialize", "profilerDeInitialize"});
 }
 
 TEST_F(CuptiPMSamplingApiTest, KeepsAtLeastOneSample) {

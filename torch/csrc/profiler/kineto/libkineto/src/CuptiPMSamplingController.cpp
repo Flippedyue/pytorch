@@ -27,8 +27,7 @@
  *   1. Bound sample counts for large traces.
  *   2. Handle on-demand/async profiling, plus interaction with auto-trace/sync.
  *   3. Push hard-coded constants into user-provided vars.
- *   4. Add tests.
- *   5. Bound drain retries so shutdown cannot block indefinitely.
+ *   4. Bound drain retries so shutdown cannot block indefinitely.
  *
  * ==============================================================================
  */
@@ -47,7 +46,7 @@ CuptiPMSamplingController::CuptiPMSamplingController(
 
 CuptiPMSamplingController::CuptiPMSamplingController(
     CuptiPMSamplingConfig config,
-    std::unique_ptr<CuptiPMSamplingApi> api)
+    std::unique_ptr<ICuptiPMSamplingApi> api)
     : config_(std::move(config)), api_(std::move(api)) {}
 
 CuptiPMSamplingController::~CuptiPMSamplingController() {
