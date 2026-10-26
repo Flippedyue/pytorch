@@ -8,10 +8,8 @@
 
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -23,7 +21,6 @@
 #include "src/output_membuf.h"
 
 using namespace KINETO_NAMESPACE;
-using namespace std::chrono_literals;
 
 namespace {
 
@@ -102,61 +99,6 @@ TEST(CuptiPMSamplingProfilerTest, RequiresMetricsAndDevice) {
       missingDevice.parse("PERFORMANCE_METRICS = sm__cycles_active.avg"));
   EXPECT_EQ(
       profiler.configure(kHardwareCounterActivities, missingDevice), nullptr);
-}
-
-TEST(CuptiPMSamplingProfilerTest, ForwardsParsedPerformanceMetricsConfig) {
-  const std::vector<std::pair<std::string, CuptiPMSamplingConfig>> cases{
-      {"PERFORMANCE_METRICS_DEVICE_ID=2\n"
-       "PERFORMANCE_METRICS=sm__cycles_active.avg\n"
-       "PERFORMANCE_METRICS_LOOKBACK_WINDOW_MS=2000",
-       {2, {"sm__cycles_active.avg"}, std::nullopt, 2s}},
-      {"PERFORMANCE_METRICS_DEVICE_ID=0\n"
-       "PERFORMANCE_METRICS=sm__cycles_active.avg\n"
-       "PERFORMANCE_METRICS_SAMPLING_INTERVAL_MS=1",
-       {0, {"sm__cycles_active.avg"}, 1ms, 1s}},
-  };
-  configureCuptiTimestampSource(false);
-
-  for (const auto& [configText, expected] : cases) {
-    SCOPED_TRACE(configText);
-    Config config;
-    ASSERT_TRUE(config.parse(configText));
-    std::optional<CuptiPMSamplingConfig> receivedConfig;
-    auto controller = std::make_unique<FakeCuptiPMSamplingController>(
-        expected.deviceId, expected.metricNames);
-    const FakeCuptiPMSamplingController& fakeController = *controller;
-    CuptiPMSamplingProfiler profiler(
-        [&controller, &receivedConfig](const CuptiPMSamplingConfig& pmConfig) {
-          receivedConfig = pmConfig;
-          return std::move(controller);
-        });
-
-    auto session = profiler.configure(kHardwareCounterActivities, config);
-
-    ASSERT_NE(session, nullptr);
-    ASSERT_TRUE(receivedConfig.has_value());
-    EXPECT_EQ(receivedConfig->deviceId, expected.deviceId);
-    EXPECT_EQ(receivedConfig->metricNames, expected.metricNames);
-    EXPECT_EQ(receivedConfig->samplingInterval, expected.samplingInterval);
-    EXPECT_EQ(receivedConfig->lookbackWindow, expected.lookbackWindow);
-    EXPECT_EQ(fakeController.prepareCalls, 1);
-  }
-}
-
-TEST(CuptiPMSamplingProfilerTest, ReturnsNoSessionWhenPreparationFails) {
-  configureCuptiTimestampSource(false);
-  Config config;
-  ASSERT_TRUE(
-      config.parse("PERFORMANCE_METRICS_DEVICE_ID=0\n"
-                   "PERFORMANCE_METRICS=sm__cycles_active.avg"));
-  CuptiPMSamplingProfiler profiler([](const CuptiPMSamplingConfig& pmConfig) {
-    auto controller = std::make_unique<FakeCuptiPMSamplingController>(
-        pmConfig.deviceId, pmConfig.metricNames);
-    controller->prepareResult = false;
-    return controller;
-  });
-
-  EXPECT_EQ(profiler.configure(kHardwareCounterActivities, config), nullptr);
 }
 
 TEST(CuptiPMSamplingSessionTest, ReportsPreparationFailure) {

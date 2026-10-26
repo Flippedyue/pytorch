@@ -386,6 +386,44 @@ TEST_F(CuptiPMSamplingApiTest, ConfiguresDefaultProfilerAndController) {
   expectCalls({"samplingDisable", "hostDeinitialize", "profilerDeInitialize"});
 }
 
+TEST_F(CuptiPMSamplingApiTest, ForwardsParsedPerformanceMetricsConfig) {
+  Config config;
+  ASSERT_TRUE(config.parse(
+      "PERFORMANCE_METRICS_DEVICE_ID=2\n"
+      "PERFORMANCE_METRICS=sm__cycles_active.avg,dram__bytes_read.sum\n"
+      "PERFORMANCE_METRICS_SAMPLING_INTERVAL_MS=0.25\n"
+      "PERFORMANCE_METRICS_LOOKBACK_WINDOW_MS=2000"));
+  configureCuptiTimestampSource(false);
+  CuptiPMSamplingProfiler profiler;
+
+  auto session = profiler.configure({ActivityType::HARDWARE_COUNTERS}, config);
+
+  ASSERT_NE(session, nullptr);
+  EXPECT_EQ(fakeCupti().configMetricNames, config.performanceMetricNames());
+  EXPECT_EQ(
+      fakeCupti().counterDataMetricNames, config.performanceMetricNames());
+  EXPECT_EQ(fakeCupti().enabledDeviceIndex, 2);
+  EXPECT_EQ(
+      fakeCupti().triggerMode,
+      CUPTI_PM_SAMPLING_TRIGGER_MODE_GPU_TIME_INTERVAL);
+  EXPECT_EQ(fakeCupti().samplingInterval, 250'000);
+  EXPECT_EQ(fakeCupti().maxSamples, 8'000);
+}
+
+TEST_F(CuptiPMSamplingApiTest, ReturnsNoSessionWhenPreparationFails) {
+  fakeCupti().setConfigResult = CUPTI_ERROR_UNKNOWN;
+  Config config;
+  ASSERT_TRUE(
+      config.parse("PERFORMANCE_METRICS_DEVICE_ID=0\n"
+                   "PERFORMANCE_METRICS=sm__cycles_active.avg"));
+  configureCuptiTimestampSource(false);
+  CuptiPMSamplingProfiler profiler;
+
+  EXPECT_EQ(
+      profiler.configure({ActivityType::HARDWARE_COUNTERS}, config), nullptr);
+  expectCalls({"samplingDisable", "hostDeinitialize", "profilerDeInitialize"});
+}
+
 TEST_F(CuptiPMSamplingApiTest, KeepsAtLeastOneSample) {
   CuptiPMSamplingApi api;
 
