@@ -42,7 +42,8 @@ constexpr std::chrono::milliseconds kDecodePollInterval{10};
 CuptiPMSamplingController::CuptiPMSamplingController(
     CuptiPMSamplingConfig config)
     : CuptiPMSamplingController(
-          std::move(config), std::make_unique<CuptiPMSamplingApi>()) {}
+          std::move(config),
+          std::make_unique<CuptiPMSamplingApi>()) {}
 
 CuptiPMSamplingController::CuptiPMSamplingController(
     CuptiPMSamplingConfig config,

@@ -374,7 +374,8 @@ TEST_F(CuptiPMSamplingApiTest, ConfiguresDefaultProfilerAndController) {
 
   ASSERT_NE(session, nullptr);
   EXPECT_EQ(fakeCupti().configMetricNames, config.performanceMetricNames());
-  EXPECT_EQ(fakeCupti().counterDataMetricNames, config.performanceMetricNames());
+  EXPECT_EQ(
+      fakeCupti().counterDataMetricNames, config.performanceMetricNames());
   EXPECT_EQ(fakeCupti().enabledDeviceIndex, 2);
   EXPECT_EQ(fakeCupti().clockRateDevice, 2);
   EXPECT_EQ(fakeCupti().samplingInterval, 1'000'000);

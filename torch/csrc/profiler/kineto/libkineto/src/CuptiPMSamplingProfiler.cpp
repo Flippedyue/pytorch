@@ -206,8 +206,8 @@ std::unique_ptr<libkineto::IActivityProfilerSession> CuptiPMSamplingProfiler::
       metricNames,
       config.performanceMetricsSamplingInterval(),
       config.performanceMetricsLookbackWindow()};
-  auto session = std::make_unique<CuptiPMSamplingSession>(
-      controllerFactory_(pmConfig));
+  auto session =
+      std::make_unique<CuptiPMSamplingSession>(controllerFactory_(pmConfig));
   if (!session->prepare()) {
     return nullptr;
   }

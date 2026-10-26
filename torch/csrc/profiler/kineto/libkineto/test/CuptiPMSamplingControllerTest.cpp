@@ -31,10 +31,20 @@ struct DecodeBatch {
   bool drained{true};
 };
 
+struct ApiCallCounts {
+  int configureCalls{0};
+  int startCalls{0};
+  int stopCalls{0};
+  int drainCalls{0};
+  int disableCalls{0};
+};
+
 class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
  public:
+  explicit FakeCuptiPMSamplingApi(ApiCallCounts& calls) : calls_(calls) {}
+
   void configure(const CuptiPMSamplingConfig& config) override {
-    ++configureCalls;
+    ++calls_.configureCalls;
     receivedConfig = config;
     if (failConfiguration) {
       throw std::runtime_error("PM sampling configuration failed");
@@ -43,7 +53,7 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
 
   void start() override {
     std::lock_guard<std::mutex> lock(mutex_);
-    ++startCalls;
+    ++calls_.startCalls;
     stopped_ = false;
     if (failStart) {
       throw std::runtime_error("PM sampling start failed");
@@ -54,13 +64,14 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
     std::lock_guard<std::mutex> lock(mutex_);
     ++decodeCalls_;
     if (stopped_) {
-      ++drainCalls;
+      ++calls_.drainCalls;
     }
     decoded_.notify_all();
-    if (failDecode) {
+    std::deque<DecodeBatch>& batches = stopped_ ? drainBatches : runningBatches;
+    // Allow samples to accumulate before a scripted worker failure.
+    if ((failDecode && batches.empty()) || (stopped_ && failDrain)) {
       throw std::runtime_error("PM sampling decode failed");
     }
-    std::deque<DecodeBatch>& batches = stopped_ ? drainBatches : runningBatches;
     if (batches.empty()) {
       return true;
     }
@@ -73,12 +84,15 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
 
   void stop() override {
     std::lock_guard<std::mutex> lock(mutex_);
-    ++stopCalls;
+    ++calls_.stopCalls;
     stopped_ = true;
+    if (failStop) {
+      throw std::runtime_error("PM sampling stop failed");
+    }
   }
 
   void disable() override {
-    ++disableCalls;
+    ++calls_.disableCalls;
   }
 
   bool waitForDecodeCalls(int count) {
@@ -98,13 +112,11 @@ class FakeCuptiPMSamplingApi final : public ICuptiPMSamplingApi {
   bool failConfiguration{false};
   bool failStart{false};
   bool failDecode{false};
-  int configureCalls{0};
-  int startCalls{0};
-  int stopCalls{0};
-  int drainCalls{0};
-  int disableCalls{0};
+  bool failStop{false};
+  bool failDrain{false};
 
  private:
+  ApiCallCounts& calls_;
   std::mutex mutex_;
   std::condition_variable decoded_;
   int decodeCalls_{0};
@@ -122,7 +134,8 @@ TEST(CuptiPMSamplingControllerTest, ForwardsConfigurationToApi) {
   };
   for (const CuptiPMSamplingConfig& config : configs) {
     SCOPED_TRACE(config.deviceId);
-    auto api = std::make_unique<FakeCuptiPMSamplingApi>();
+    ApiCallCounts calls;
+    auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
     const FakeCuptiPMSamplingApi& fakeApi = *api;
     CuptiPMSamplingController controller(config, std::move(api));
 
@@ -131,15 +144,17 @@ TEST(CuptiPMSamplingControllerTest, ForwardsConfigurationToApi) {
     ASSERT_TRUE(fakeApi.receivedConfig.has_value());
     EXPECT_EQ(fakeApi.receivedConfig->deviceId, config.deviceId);
     EXPECT_EQ(fakeApi.receivedConfig->metricNames, config.metricNames);
-    EXPECT_EQ(fakeApi.receivedConfig->samplingInterval, config.samplingInterval);
+    EXPECT_EQ(
+        fakeApi.receivedConfig->samplingInterval, config.samplingInterval);
     EXPECT_EQ(fakeApi.receivedConfig->lookbackWindow, config.lookbackWindow);
     EXPECT_FALSE(controller.stop());
-    EXPECT_EQ(fakeApi.disableCalls, 1);
+    EXPECT_EQ(calls.disableCalls, 1);
   }
 }
 
 TEST(CuptiPMSamplingControllerTest, CleansUpWhenConfigurationFails) {
-  auto api = std::make_unique<FakeCuptiPMSamplingApi>();
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
   api->failConfiguration = true;
   const FakeCuptiPMSamplingApi& fakeApi = *api;
   CuptiPMSamplingController controller(kConfig, std::move(api));
@@ -147,9 +162,9 @@ TEST(CuptiPMSamplingControllerTest, CleansUpWhenConfigurationFails) {
   EXPECT_FALSE(controller.prepare());
 
   ASSERT_TRUE(fakeApi.receivedConfig.has_value());
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 1);
   EXPECT_FALSE(controller.stop());
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 1);
 }
 
 TEST(CuptiPMSamplingControllerTest, RejectsInvalidConfigBeforeCallingApi) {
@@ -161,41 +176,43 @@ TEST(CuptiPMSamplingControllerTest, RejectsInvalidConfigBeforeCallingApi) {
   };
   for (const CuptiPMSamplingConfig& config : configs) {
     SCOPED_TRACE(testing::PrintToString(config.metricNames));
-    auto api = std::make_unique<FakeCuptiPMSamplingApi>();
+    ApiCallCounts calls;
+    auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
     const FakeCuptiPMSamplingApi& fakeApi = *api;
     CuptiPMSamplingController controller(config, std::move(api));
 
     EXPECT_FALSE(controller.prepare());
     controller.start();
 
-    EXPECT_EQ(fakeApi.configureCalls, 0);
+    EXPECT_EQ(calls.configureCalls, 0);
     EXPECT_FALSE(fakeApi.receivedConfig.has_value());
-    EXPECT_EQ(fakeApi.startCalls, 0);
+    EXPECT_EQ(calls.startCalls, 0);
     EXPECT_FALSE(controller.stop());
-    EXPECT_EQ(fakeApi.disableCalls, 0);
+    EXPECT_EQ(calls.disableCalls, 0);
   }
 }
 
 TEST(CuptiPMSamplingControllerTest, RejectsPreparationUntilStopped) {
-  auto api = std::make_unique<FakeCuptiPMSamplingApi>();
-  const FakeCuptiPMSamplingApi& fakeApi = *api;
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
   CuptiPMSamplingController controller(kConfig, std::move(api));
 
   ASSERT_TRUE(controller.prepare());
   EXPECT_FALSE(controller.prepare());
-  EXPECT_EQ(fakeApi.configureCalls, 1);
-  EXPECT_EQ(fakeApi.disableCalls, 0);
+  EXPECT_EQ(calls.configureCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 0);
 
   EXPECT_FALSE(controller.stop());
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 1);
   EXPECT_TRUE(controller.prepare());
-  EXPECT_EQ(fakeApi.configureCalls, 2);
+  EXPECT_EQ(calls.configureCalls, 2);
   EXPECT_FALSE(controller.stop());
-  EXPECT_EQ(fakeApi.disableCalls, 2);
+  EXPECT_EQ(calls.disableCalls, 2);
 }
 
 TEST(CuptiPMSamplingControllerTest, FiltersWorkerSamplesAndTransfersOwnership) {
-  auto api = std::make_unique<FakeCuptiPMSamplingApi>();
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
   api->runningBatches = {
       {{{100, 110, {1.0}}}, false},
       {{{120, 130, {2.0}},
@@ -228,7 +245,8 @@ TEST(CuptiPMSamplingControllerTest, FiltersWorkerSamplesAndTransfersOwnership) {
 }
 
 TEST(CuptiPMSamplingControllerTest, DrainsUntilAllBatchesAreDecoded) {
-  auto api = std::make_unique<FakeCuptiPMSamplingApi>();
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
   api->drainBatches = {
       {{{100, 110, {1.0}}}, false},
       {{{120, 130, {2.0}}}, false},
@@ -242,10 +260,10 @@ TEST(CuptiPMSamplingControllerTest, DrainsUntilAllBatchesAreDecoded) {
   EXPECT_TRUE(fakeApi.waitForDecodeCalls(1));
   EXPECT_TRUE(controller.stop());
 
-  EXPECT_EQ(fakeApi.startCalls, 1);
-  EXPECT_EQ(fakeApi.stopCalls, 1);
-  EXPECT_EQ(fakeApi.drainCalls, 3);
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.startCalls, 1);
+  EXPECT_EQ(calls.stopCalls, 1);
+  EXPECT_EQ(calls.drainCalls, 3);
+  EXPECT_EQ(calls.disableCalls, 1);
   const std::vector<CuptiPMSample> samples = controller.takeSamples();
   ASSERT_EQ(samples.size(), 2);
   EXPECT_EQ(samples[0].rawStartTimestamp, 120);
@@ -256,13 +274,14 @@ TEST(CuptiPMSamplingControllerTest, DrainsUntilAllBatchesAreDecoded) {
   EXPECT_EQ(samples[1].values, (std::vector<double>{3.0}));
 
   EXPECT_FALSE(controller.stop());
-  EXPECT_EQ(fakeApi.stopCalls, 1);
-  EXPECT_EQ(fakeApi.drainCalls, 3);
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.stopCalls, 1);
+  EXPECT_EQ(calls.drainCalls, 3);
+  EXPECT_EQ(calls.disableCalls, 1);
 }
 
 TEST(CuptiPMSamplingControllerTest, SkipsFinalDrainAfterWorkerFailure) {
-  auto api = std::make_unique<FakeCuptiPMSamplingApi>();
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
   api->failDecode = true;
   FakeCuptiPMSamplingApi& fakeApi = *api;
   CuptiPMSamplingController controller(kConfig, std::move(api));
@@ -273,24 +292,120 @@ TEST(CuptiPMSamplingControllerTest, SkipsFinalDrainAfterWorkerFailure) {
   EXPECT_TRUE(controller.stop());
 
   EXPECT_EQ(fakeApi.decodeCalls(), 1);
-  EXPECT_EQ(fakeApi.stopCalls, 1);
-  EXPECT_EQ(fakeApi.drainCalls, 0);
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.stopCalls, 1);
+  EXPECT_EQ(calls.drainCalls, 0);
+  EXPECT_EQ(calls.disableCalls, 1);
   EXPECT_TRUE(controller.takeSamples().empty());
 }
 
-TEST(CuptiPMSamplingControllerTest, DisablesWithoutStartingWorkerOnStartFailure) {
-  auto api = std::make_unique<FakeCuptiPMSamplingApi>();
+TEST(CuptiPMSamplingControllerTest, ResetsSessionStateAfterWorkerFailure) {
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
+  api->runningBatches = {{{{100, 110, {1.0}}, {120, 130, {2.0}}}, false}};
+  api->failDecode = true;
+  FakeCuptiPMSamplingApi& fakeApi = *api;
+  CuptiPMSamplingController controller(kConfig, std::move(api));
+
+  ASSERT_TRUE(controller.prepare());
+  controller.start();
+  EXPECT_TRUE(fakeApi.waitForDecodeCalls(2));
+  EXPECT_TRUE(controller.stop());
+  EXPECT_EQ(fakeApi.decodeCalls(), 2);
+  EXPECT_TRUE(fakeApi.runningBatches.empty());
+  EXPECT_EQ(calls.drainCalls, 0);
+  EXPECT_EQ(calls.disableCalls, 1);
+
+  // Leave the first session's valid sample buffered for prepare() to clear.
+  fakeApi.failDecode = false;
+  fakeApi.drainBatches = {
+      {{{300, 310, {3.0}}, {320, 330, {4.0}}}, false},
+      {{{340, 350, {5.0}}}, true},
+  };
+  ASSERT_TRUE(controller.prepare());
+  controller.start();
+  EXPECT_TRUE(fakeApi.waitForDecodeCalls(3));
+  EXPECT_TRUE(controller.stop());
+
+  EXPECT_EQ(calls.configureCalls, 2);
+  EXPECT_EQ(calls.startCalls, 2);
+  EXPECT_EQ(calls.stopCalls, 2);
+  EXPECT_EQ(calls.drainCalls, 2);
+  EXPECT_EQ(calls.disableCalls, 2);
+  const std::vector<CuptiPMSample> samples = controller.takeSamples();
+  ASSERT_EQ(samples.size(), 2);
+  EXPECT_EQ(samples[0].rawStartTimestamp, 320);
+  EXPECT_EQ(samples[0].rawEndTimestamp, 330);
+  EXPECT_EQ(samples[0].values, (std::vector<double>{4.0}));
+  EXPECT_EQ(samples[1].rawStartTimestamp, 340);
+  EXPECT_EQ(samples[1].rawEndTimestamp, 350);
+  EXPECT_EQ(samples[1].values, (std::vector<double>{5.0}));
+}
+
+TEST(CuptiPMSamplingControllerTest, DestructionStopsActiveSession) {
+  ApiCallCounts calls;
+  {
+    auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
+    api->drainBatches = {
+        {{{100, 110, {1.0}}}, false},
+        {{{120, 130, {2.0}}}, true},
+    };
+    FakeCuptiPMSamplingApi& fakeApi = *api;
+    CuptiPMSamplingController controller(kConfig, std::move(api));
+
+    ASSERT_TRUE(controller.prepare());
+    controller.start();
+    EXPECT_TRUE(fakeApi.waitForDecodeCalls(1));
+    EXPECT_EQ(calls.stopCalls, 0);
+    EXPECT_EQ(calls.disableCalls, 0);
+  }
+
+  EXPECT_EQ(calls.stopCalls, 1);
+  EXPECT_EQ(calls.drainCalls, 2);
+  EXPECT_EQ(calls.disableCalls, 1);
+}
+
+TEST(CuptiPMSamplingControllerTest, DisablesAfterStopOrDrainFailure) {
+  for (const bool failStop : {true, false}) {
+    SCOPED_TRACE(failStop);
+    ApiCallCounts calls;
+    {
+      auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
+      api->failStop = failStop;
+      api->failDrain = !failStop;
+      FakeCuptiPMSamplingApi& fakeApi = *api;
+      CuptiPMSamplingController controller(kConfig, std::move(api));
+
+      ASSERT_TRUE(controller.prepare());
+      controller.start();
+      EXPECT_TRUE(fakeApi.waitForDecodeCalls(1));
+      EXPECT_TRUE(controller.stop());
+      EXPECT_EQ(calls.stopCalls, 1);
+      EXPECT_EQ(calls.drainCalls, failStop ? 0 : 1);
+      EXPECT_EQ(calls.disableCalls, 1);
+      EXPECT_FALSE(controller.stop());
+    }
+
+    EXPECT_EQ(calls.stopCalls, 1);
+    EXPECT_EQ(calls.drainCalls, failStop ? 0 : 1);
+    EXPECT_EQ(calls.disableCalls, 1);
+  }
+}
+
+TEST(
+    CuptiPMSamplingControllerTest,
+    DisablesWithoutStartingWorkerOnStartFailure) {
+  ApiCallCounts calls;
+  auto api = std::make_unique<FakeCuptiPMSamplingApi>(calls);
   api->failStart = true;
   FakeCuptiPMSamplingApi& fakeApi = *api;
   CuptiPMSamplingController controller(kConfig, std::move(api));
 
   ASSERT_TRUE(controller.prepare());
   EXPECT_NO_THROW(controller.start());
-  EXPECT_EQ(fakeApi.startCalls, 1);
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.startCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 1);
   EXPECT_FALSE(controller.stop());
-  EXPECT_EQ(fakeApi.stopCalls, 0);
+  EXPECT_EQ(calls.stopCalls, 0);
   EXPECT_EQ(fakeApi.decodeCalls(), 0);
-  EXPECT_EQ(fakeApi.disableCalls, 1);
+  EXPECT_EQ(calls.disableCalls, 1);
 }

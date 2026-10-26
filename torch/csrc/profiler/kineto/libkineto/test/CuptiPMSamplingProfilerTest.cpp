@@ -146,9 +146,9 @@ TEST(CuptiPMSamplingProfilerTest, ForwardsParsedPerformanceMetricsConfig) {
 TEST(CuptiPMSamplingProfilerTest, ReturnsNoSessionWhenPreparationFails) {
   configureCuptiTimestampSource(false);
   Config config;
-  ASSERT_TRUE(config.parse(
-      "PERFORMANCE_METRICS_DEVICE_ID=0\n"
-      "PERFORMANCE_METRICS=sm__cycles_active.avg"));
+  ASSERT_TRUE(
+      config.parse("PERFORMANCE_METRICS_DEVICE_ID=0\n"
+                   "PERFORMANCE_METRICS=sm__cycles_active.avg"));
   CuptiPMSamplingProfiler profiler([](const CuptiPMSamplingConfig& pmConfig) {
     auto controller = std::make_unique<FakeCuptiPMSamplingController>(
         pmConfig.deviceId, pmConfig.metricNames);
