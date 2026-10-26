@@ -325,6 +325,15 @@ class Library:
 
         self._op_defs.add(qualname)
         _defs.add(qualname)
+        # The name the dispatcher registered: the schema may start with whitespace.
+        registered = name.strip()
+        if "::" not in registered:
+            registered = f"{self.ns}::{registered}"
+        self._registration_handles.append(
+            torch._library.simple_registry.singleton.record_registering_module(
+                registered, _library.utils.registering_module(inspect.currentframe())
+            )
+        )
         return result
 
     def _register_fake(self, op_name, fn, _stacklevel=1, *, allow_override=True):
