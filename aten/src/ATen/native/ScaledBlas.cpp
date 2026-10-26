@@ -222,6 +222,12 @@ TORCH_META_FUNC(_scaled_addmm)(
       {mat1.size(0), mat2.size(1)},
       {},
       self.options());
+  // With empty strides the .out wrapper passes out= through unchanged.
+  const auto& out = maybe_get_output(0);
+  TORCH_CHECK_VALUE(
+      out.stride(1) == 1 &&
+          out.stride(0) == std::max<int64_t>(1, out.size(1)),
+      "scaled_addmm requires canonical contiguous row-major output strides");
 }
 
 // V2: Grouped scaled matrix multiply. Shape inference + output allocation runs

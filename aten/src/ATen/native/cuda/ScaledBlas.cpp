@@ -74,6 +74,16 @@ bool _scaled_mm_is_fnuz() {
     return at::detail::getCUDAHooks().isGPUArch({"gfx942"});
 }
 
+// For ROCm, match behavior of f8f8bf16_rowwise type checking, for unit test purposes.
+void _check_rocm_rowwise_mat_b_dtype(const Tensor& mat_b) {
+  if (_scaled_mm_is_fnuz()) {
+    TORCH_CHECK_VALUE(mat_b.dtype() == at::kFloat8_e4m3fnuz, "expected mat_b.dtype() to be at::kFloat8_e4m3fnuz, but got ", mat_b.dtype());
+  }
+  else {
+    TORCH_CHECK_VALUE(mat_b.dtype() == at::kFloat8_e4m3fn, "expected mat_b.dtype() to be at::kFloat8_e4m3fn, but got ", mat_b.dtype());
+  }
+}
+
 #if ROCM_VERSION >= 70000
 static void check_blockwise_e8m0fnu_arch_supported() {
   std::vector<std::string> mx_archs{"gfx950"};
@@ -525,14 +535,15 @@ _scaled_gemm(
     out.copy_(*effective_accumulator);
     effective_accumulator = out;
   }
-  TORCH_CHECK(
+  // TORCH_META_FUNC(_scaled_addmm) guarantees canonical input/out of one dtype.
+  TORCH_INTERNAL_ASSERT(
       !effective_accumulator ||
           (effective_accumulator->stride(0) == args.result_ld &&
            effective_accumulator->scalar_type() == out_dtype_),
       "scaled_addmm: input and output must have the same dtype and leading dimension");
   auto tuning_ctx = at::cuda::tunable::getTuningContext();
   // TunableOp's ScaledGemmParams cannot represent the addmm accumulator/alpha/beta
-  // yet, so bypass it for epilogues (ROCm blocks the accumulator upstream, CUDA-only).
+  // yet, so bypass it for epilogues.
   const bool tunable_supports_epilogue = !effective_accumulator &&
       epilogue.alpha == 1.0f && epilogue.beta == 0.0f;
   bool tunable_op_enabled =
@@ -951,14 +962,7 @@ _scaled_rowwise_rowwise(
   }
 #else
 
-  // For ROCm, match behavior of f8f8bf16_rowwise type checking, for unit test purposes.
-  //Tensor b = mat_b;
-  if (_scaled_mm_is_fnuz()) {
-    TORCH_CHECK_VALUE(mat_b.dtype() == at::kFloat8_e4m3fnuz, "expected mat_b.dtype() to be at::kFloat8_e4m3fnuz, but got ", mat_b.dtype());
-  }
-  else {
-    TORCH_CHECK_VALUE(mat_b.dtype() == at::kFloat8_e4m3fn, "expected mat_b.dtype() to be at::kFloat8_e4m3fn, but got ", mat_b.dtype());
-  }
+  _check_rocm_rowwise_mat_b_dtype(mat_b);
   // Until more than bf16 is supported.
   TORCH_CHECK_VALUE(out.scalar_type() == ScalarType::BFloat16,
        "hipblaslt rowwise _scaled_mm only supports BFloat16 output but got ", out.scalar_type());
@@ -1526,10 +1530,6 @@ void scaled_mm_cuda_v2_impl(
       allowed_device,
       op_name,
       " is only supported on CUDA devices with compute capability >= 9.0 or 8.9, or ROCm MI300+");
-#ifdef USE_ROCM
-  TORCH_CHECK_NOT_IMPLEMENTED(
-      !accumulator.has_value(), op_name, " is not implemented for ROCm");
-#endif
   if (accumulator) {
     // Layout was validated by the meta function; cuBLASLt additionally needs
     // a 16-byte aligned C pointer, which in-place callers can violate.
@@ -1671,6 +1671,20 @@ void scaled_mm_cuda_v2_impl(
 
   ScaledGemmEpilogue epilogue;
   if (accumulator) {
+#ifdef USE_ROCM
+    // hipBLASLt's C operand is verified only for rowwise FP8 with BF16 output
+    // on gfx942/gfx950 with ROCm 7.0+. Validate before the alpha/beta and
+    // empty-dimension shortcuts, including the rowwise mat_b dtype check that
+    // _scaled_rowwise_rowwise would apply, so every scalar value fails alike.
+    TORCH_CHECK_NOT_IMPLEMENTED(
+        ROCM_VERSION >= 70000 &&
+            at::detail::getCUDAHooks().isGPUArch({"gfx942", "gfx950"}) &&
+            gemm_impl == ScaledGemmImplementation::ROWWISE_ROWWISE &&
+            out_mut.scalar_type() == ScalarType::BFloat16,
+        op_name,
+        " on ROCm only supports rowwise FP8 scaling with BF16 output on gfx942/gfx950 with ROCm 7.0+");
+    _check_rocm_rowwise_mat_b_dtype(mat_b);
+#endif
     TORCH_CHECK_NOT_IMPLEMENTED(
         gemm_impl != ScaledGemmImplementation::MXFP4_MXFP4,
         op_name,
