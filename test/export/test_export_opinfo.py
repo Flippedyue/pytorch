@@ -176,7 +176,10 @@ selected_op_db = [op for op in op_db if op.name in selected_ops]
 def _get_env_by_device(device):
     device_type = torch.device(device).type
     if device_type == "cuda":
-        return {"CUDA_VISIBLE_DEVICES": ""}
+        # Pass LD_LIBRARY_PATH through to the subprocess so ld-linux can find
+        # libpython. Replacing the environment drops it and the child fails
+        # before Python starts.
+        return {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
     elif device_type == "xpu":
         return {**os.environ, "ONEAPI_DEVICE_SELECTOR": "*:cpu", "ZE_AFFINITY_MASK": ""}
     raise AssertionError(
