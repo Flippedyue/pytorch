@@ -59,6 +59,26 @@ def get_guard_pg() -> dist.ProcessGroup | None:
     return None
 
 
+def _is_fake_world() -> bool:
+    """Whether every backend of the default group is fake, so no rank has a real peer
+    to rendezvous with."""
+    config = dist.BackendConfig(dist.get_backend_config())
+    return all(
+        backend == dist.Backend.FAKE
+        for backend in config.get_device_backend_map().values()
+    )
+
+
+def _compile_sync_backend() -> str | None:
+    """The backend get_compile_sync_pg builds its group on, or None when this build
+    cannot build it (a real world without gloo)."""
+    if _is_fake_world():
+        return dist.Backend.FAKE
+    if dist.is_gloo_available():
+        return dist.Backend.GLOO
+    return None
+
+
 # NB: Like get_guard_pg, this is only called when the caller explicitly asked for
 # compile time synchronization.
 def get_compile_sync_pg() -> dist.ProcessGroup | None:
@@ -72,13 +92,20 @@ def get_compile_sync_pg() -> dist.ProcessGroup | None:
     compile time op. We thus require gloo as the backend. Gloo keeps the traffic off
     the accelerator as well, so a compile time collective can't interleave with
     an in flight NCCL op.
+
+    The exception is a fake default group, where one real rank stands in for the
+    whole world and has no peers to rendezvous with over gloo. Its sync group is
+    fake as well, so every compile time collective returns the local value: fake
+    allgather copies the input into every output slot and MIN/MAX all_reduce leave
+    it unchanged, which makes each decision the local one.
     """
     if dist.is_available() and dist.is_initialized():
         global _COMPILE_SYNC_PG
         if _COMPILE_SYNC_PG is None:
-            if not dist.is_gloo_available():
-                # No fallback: per above, the accelerator backend would let a compile
-                # time collective match a runtime one.
+            backend = _compile_sync_backend()
+            if backend is None:
+                # No fallback: per above, the accelerator backend would let a
+                # compile time collective match a runtime one.
                 raise RuntimeError(
                     "Compile time cross rank synchronization requires the gloo "
                     "backend, which this build of PyTorch does not have. Either "
@@ -86,15 +113,22 @@ def get_compile_sync_pg() -> dist.ProcessGroup | None:
                     "torch._functorch.config._sync_decision_cross_ranks and "
                     "torch._functorch.config._sync_cache_decision_cross_ranks."
                 )
-            # Left to itself, _new_group_with_tag picks the global default_pg_timeout
-            # constant rather than the timeout init_process_group was configured with.
+            # Left to itself, _new_group_with_tag picks the global
+            # default_pg_timeout constant rather than the timeout
+            # init_process_group was configured with.
             default_pg = dist.distributed_c10d._get_default_group()
             coll_device = dist.distributed_c10d._get_object_coll_device(default_pg)
-            default_backend = default_pg._get_backend(torch.device(coll_device))
+            # A fake backend built without options has none, so fall back to another
+            # device's backend (cuda's in cpu:fake,cuda:nccl); none has options only
+            # in a fake world.
+            timeout = None
+            for device in (torch.device(coll_device), *default_pg._device_types):
+                options = default_pg._get_backend(device).options
+                if options is not None:
+                    timeout = options._timeout
+                    break
             compile_sync_pg = dist.distributed_c10d._new_group_with_tag(
-                backend="gloo",
-                timeout=default_backend.options._timeout,
-                pg_tag="pt2_compile_sync_pg",
+                backend=backend, timeout=timeout, pg_tag="pt2_compile_sync_pg"
             )
             if compile_sync_pg == dist.GroupMember.NON_GROUP_MEMBER:
                 raise AssertionError(
