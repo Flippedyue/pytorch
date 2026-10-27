@@ -3,6 +3,7 @@ import collections
 import contextlib
 import copy
 import functools
+import importlib
 import inspect
 import logging
 import math
@@ -1166,6 +1167,8 @@ class _Patcher:
         super().__init__()
         self.patches_made: list[_PatchedFn] = []
         self.visited: set[int] = set()
+        # Open _maybe_revert_all_patches windows; only the outermost one reverts.
+        self.revert_depth = 0
 
     def patch(
         self,
@@ -1263,16 +1266,27 @@ def _new_patcher() -> Iterator[_Patcher]:
 
 
 @contextlib.contextmanager
-def _maybe_revert_all_patches() -> Iterator[None]:
-    current_patcher = CURRENT_PATCHER
+def _maybe_revert_all_patches(patcher: _Patcher | None = None) -> Iterator[None]:
+    current_patcher = CURRENT_PATCHER if patcher is None else patcher
+    # A nested window, e.g. Dynamo compiling from a lazy import FX resolves, finds
+    # the patches already reverted and leaves reapplying them to the outer one.
+    if current_patcher is not None and current_patcher.revert_depth > 0:
+        current_patcher.revert_depth += 1
+        try:
+            yield
+        finally:
+            current_patcher.revert_depth -= 1
+        return
     patches_made = None
     patches_removed = None
     try:
         if current_patcher is not None:
+            current_patcher.revert_depth += 1
             patches_removed = current_patcher.revert_all_patches()
         yield
     finally:
         if current_patcher is not None:
+            current_patcher.revert_depth -= 1
             patches_made = current_patcher.reapply_all_patches()
         if patches_made != patches_removed:
             raise AssertionError(
@@ -1289,11 +1303,46 @@ def _patch_wrapped_functions(patcher: _Patcher) -> None:
         if name not in frame_dict and hasattr(builtins, name):
             orig_fn = getattr(builtins, name)
         else:
+            _resolve_lazy_imports(patcher, frame_dict, (name,))
             orig_fn = frame_dict[name]
         patcher.patch(frame_dict, name, _create_wrapped_func(orig_fn))
 
     for cls, name in _wrapped_methods_to_patch:
         patcher.patch_method(cls, name, _create_wrapped_method(cls, name))
+
+
+def _resolve_lazy_imports(
+    patcher: _Patcher, frame_dict: dict[str, Any], names: Iterable[str] | None = None
+) -> None:
+    """Resolve the unresolved lazy imports among ``names`` (default: all) of
+    ``frame_dict`` with ``patcher``'s patches reverted and FX's tracing flag off.
+
+    Reading an unresolved lazy import runs its module body, which must not see the
+    globals and ``torch.nn.Module`` methods FX patched for the trace, nor take
+    itself to be traced (a module that calls a ``torch.compile``'d function at
+    import). Under make_fx, its proxy and fake modes stay on. Only FX's own reads
+    go through here; a lazy import the traced code itself reads resolves as any
+    other code it runs, with the patches applied.
+    ``importlib.is_lazy_import`` exists only on PEP 690-style lazy-import runtimes
+    (e.g. Cinder).
+    """
+    is_lazy_import = getattr(importlib, "is_lazy_import", None)
+    if is_lazy_import is None:
+        return
+    lazy_names = [
+        name
+        for name in (frame_dict if names is None else names)
+        if name in frame_dict and is_lazy_import(frame_dict, name)
+    ]
+    if lazy_names:
+        registered = len(_wrapped_fns_to_patch), len(_wrapped_methods_to_patch)
+        with _maybe_revert_all_patches(patcher), _is_fx_tracing_context(False):
+            for name in lazy_names:
+                _ = frame_dict[name]
+        # A module body it ran can register torch.fx.wrap targets this trace has not
+        # patched yet; patching is idempotent for the rest.
+        if (len(_wrapped_fns_to_patch), len(_wrapped_methods_to_patch)) != registered:
+            _patch_wrapped_functions(patcher)
 
 
 def _autowrap_check(
@@ -1304,6 +1353,9 @@ def _autowrap_check(
     This method searches a scope for them and patches them if found.
     """
     if patcher.visit_once(frame_dict):
+        # The scan below reads every global in frame_dict, so it would resolve all of
+        # this scope's lazy imports, including ones the traced code never touches.
+        _resolve_lazy_imports(patcher, frame_dict)
         for name, value in frame_dict.items():
             if (
                 not name.startswith("_")
