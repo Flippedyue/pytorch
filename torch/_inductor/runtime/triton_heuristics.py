@@ -758,6 +758,10 @@ class CachingAutotuner(KernelInterface):
         # Cached launcher for fast path — bypasses all preamble after first
         # successful steady-state launch.  Set to None until populated.
         self._cached_launcher: LauncherType | None = None
+        # Whether run() has launched this kernel in this process. The fast path
+        # cache does not say: it stays unset under the profiler, debug mode,
+        # benchmark runs and cubin saving.
+        self._launched = False
         # Pre-compute static eligibility for launcher caching.  These flags
         # are set once in __init__ and never change, so we avoid re-checking
         # them on every kernel launch.
@@ -772,6 +776,9 @@ class CachingAutotuner(KernelInterface):
         # Compile-time info included in runtime logginging
         self.compile_id: CompileId | None = None
         self.is_backward = False
+        # Whether any compile used this kernel in a forward: is_backward holds only
+        # the latest compile's direction, and a kernel object can serve both.
+        self._forward_use = False
 
         # Mode for launch grid calculation
         self.grid_mode: Literal["python", "cpp"] = "python"
@@ -859,6 +866,7 @@ class CachingAutotuner(KernelInterface):
                 self.compile_results = [self._precompile_config(best_config)]
 
     def set_compile_info(self, compile_id: CompileId | None, is_backward: bool) -> None:
+        self._forward_use = self._forward_use or not is_backward
         self.compile_id = compile_id
         self.is_backward = is_backward
 
@@ -1241,6 +1249,7 @@ class CachingAutotuner(KernelInterface):
             self.launchers,
             getattr(self.fn, "_hash_lock", None),
             self.benchmark_failure_reasons,
+            self._launched,
         )
         self.fn.fn = None
         self.fn.__globals__ = None
@@ -1248,6 +1257,7 @@ class CachingAutotuner(KernelInterface):
         self.fn.repr = _ConstRepr(self.fn.repr(self.fn))
         self.launchers = []
         self._cached_launcher = None
+        self._launched = False
         self.benchmark_failure_reasons = {}
         self.fn._hash_lock = None
         return old_values
@@ -1263,11 +1273,13 @@ class CachingAutotuner(KernelInterface):
                 self.launchers,
                 self.fn._hash_lock,
                 self.benchmark_failure_reasons,
+                self._launched,
             ) = old_values
         else:
             # even if we don't need/have specific values, we do need the
             # _hash_lock to be a valid RLock
             self.fn._hash_lock = threading.RLock()
+            self._launched = False
 
     def prepare_for_caching(self) -> None:
         """
@@ -2607,6 +2619,7 @@ class CachingAutotuner(KernelInterface):
             if (
                 result := plugin.pre_dispatch(self, *args, stream=stream, **kwargs)
             ) is not DEFER:
+                self._launched = True
                 return result
 
         if len(self.launchers) != 1:
@@ -2621,6 +2634,7 @@ class CachingAutotuner(KernelInterface):
                             self, *args, stream=stream, **kwargs
                         )
                     ) is not DEFER:
+                        self._launched = True
                         return result
                 # Re-check: a plugin may have mutated launchers down to one.
                 if len(self.launchers) > 1:
@@ -2673,6 +2687,7 @@ class CachingAutotuner(KernelInterface):
                 raise
         finally:
             self._post_launch()
+        self._launched = True
 
         # Populate fast path: cache the launcher for future calls.  Static
         # conditions (interpret, dump flags) are pre-computed in _cache_eligible;
@@ -3705,6 +3720,7 @@ class DebugAutotuner(CachingAutotuner):
 
             if self.cached is None:
                 ms = self.bench(launcher, *args, with_profiler=self.with_profiler)
+                self._launched = True
                 num_in_out_ptrs = len(
                     [
                         arg_name

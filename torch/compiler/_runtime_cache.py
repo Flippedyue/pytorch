@@ -346,9 +346,18 @@ class _UnresolvedTritonExport(RuntimeError):
     def __init__(self, sources: list[dict[str, object]]) -> None:
         self.sources = sources
         self.report = {"sources": sources}
+        hint = ""
+        if any(source.get("untuned_backward_eligible") for source in sources):
+            hint = (
+                " A backward kernel no captured step ran (untuned_backward_eligible) "
+                "can instead be frozen untuned, with "
+                "DynamoTracer(require_tuned_backward=False)."
+            )
         super().__init__(
             "Cannot export Triton sources: no fully resolved static launcher. Run "
-            "every Triton kernel the serving process needs inside the capture block.\n"
+            "every Triton kernel the serving process needs inside the capture block."
+            + hint
+            + "\n"
             + json.dumps(self.report, sort_keys=True)
         )
 
@@ -388,7 +397,10 @@ def _triton_export_diagnostic(
         "kernel_name": kernel.inductor_meta.get("kernel_name"),
         "filename": getattr(kernel, "filename", None),
         "compile_id": str(compile_id) if compile_id is not None else None,
+        # direction is the latest compile's; these two decide an untuned freeze.
         "direction": direction,
+        "forward_use": kernel._forward_use,
+        "launched": kernel._launched,
         "heuristic": getattr(getattr(kernel, "heuristic_type", None), "name", None),
         "config_count": len(kernel.compile_results if configs is None else configs),
         "launcher_count": len(kernel.launchers),
@@ -431,45 +443,162 @@ def _retain_cubin(result: StaticTritonCompileResult) -> None:
             static_kernel.cubin_raw = f.read()
 
 
-def _freeze_triton_kernel(key: str, instances: list[CachingAutotuner]) -> bytes:
-    from torch._inductor.runtime.triton_heuristics import StaticTritonCompileResult
+def _detached_for_freeze(
+    kernel: CachingAutotuner, result: StaticTritonCompileResult
+) -> tuple[CachingAutotuner, StaticTritonCompileResult]:
+    # run() reads the live kernel's launchers without taking its lock, so freeze a
+    # copy and leave the live kernel untouched. The caller holds kernel.lock.
+    saved = type(kernel).__new__(type(kernel))
+    saved.__dict__.update(kernel.__dict__)
+    saved.fn = _detached_copy(kernel.fn)
+    saved_result = copy.copy(result)
+    saved_result.kernel = copy.copy(result.kernel)
+    return saved, saved_result
+
+
+def _pickle_frozen_triton_kernel(
+    key: str,
+    kernel: CachingAutotuner,
+    saved: CachingAutotuner,
+    saved_result: StaticTritonCompileResult,
+) -> bytes | dict[str, object]:
+    """Return the frozen record, or the diagnostic of a cubin it cannot carry."""
     from torch._inductor.triton_bundler import StaticallyLaunchedAutotuner
 
+    saved.prepare_for_pickle()
+    saved.compile_results = [saved_result]
+    # pyrefly: ignore [bad-assignment]
+    saved._reload_kernel = None
+    try:
+        _retain_cubin(saved_result)
+    except (OSError, RuntimeError) as exc:
+        with kernel.lock:
+            diagnostic = _triton_export_diagnostic(kernel, "cubin_unavailable")
+        diagnostic["error"] = str(exc)
+        return diagnostic
+    return pickle.dumps(
+        StaticallyLaunchedAutotuner(
+            key, saved.inductor_meta.get("kernel_name", "unknown_kernel"), saved
+        )
+    )
+
+
+def _freeze_triton_kernel(
+    key: str,
+    instances: list[CachingAutotuner],
+    *,
+    require_tuned_backward: bool,
+) -> tuple[bytes, dict[str, object] | None]:
+    """The frozen record of a source, and its untuned report if it was frozen
+    untuned."""
+    from torch._inductor.runtime.triton_heuristics import StaticTritonCompileResult
+
     rejected: list[dict[str, object]] = []
+    # Where each instance's diagnostic sits in rejected, so a later attempt on the
+    # same instance replaces it rather than reporting the instance twice.
+    slots: dict[int, int] = {}
+
+    def reject(kernel: CachingAutotuner, diagnostic: dict[str, object]) -> None:
+        if id(kernel) in slots:
+            rejected[slots[id(kernel)]] = diagnostic
+        else:
+            slots[id(kernel)] = len(rejected)
+            rejected.append(diagnostic)
+
     # Rendering can create an unexecuted instance of an already warmed source.
-    for kernel in sorted(instances, key=lambda k: k._cached_launcher is None):
+    for kernel in sorted(instances, key=lambda k: not k._launched):
         with kernel.lock:
             reason = _triton_export_rejection(kernel)
             if reason is not None:
-                rejected.append(_triton_export_diagnostic(kernel, reason))
+                reject(kernel, _triton_export_diagnostic(kernel, reason))
                 continue
             result = cast(
                 StaticTritonCompileResult, kernel.launchers[0]._compile_result
             )
-            # run() reads the live kernel's launchers without taking its lock, so
-            # freeze a copy and leave the live kernel untouched.
-            saved = type(kernel).__new__(type(kernel))
-            saved.__dict__.update(kernel.__dict__)
-            saved.fn = _detached_copy(kernel.fn)
-            saved_result = copy.copy(result)
-            saved_result.kernel = copy.copy(result.kernel)
-        saved.prepare_for_pickle()
-        saved.compile_results = [saved_result]
-        saved._reload_kernel = None
+            saved, saved_result = _detached_for_freeze(kernel, result)
+        payload = _pickle_frozen_triton_kernel(key, kernel, saved, saved_result)
+        if isinstance(payload, bytes):
+            return payload, None
+        reject(kernel, payload)
+
+    # A training capture lowers each backward with its forward, so it can compile a
+    # backward that no captured step ran, e.g. in a graph variant whose backward no
+    # captured step reached. No instance of such a source ever launched, so none
+    # finished autotuning, and serving under no_compilation() cannot finish it
+    # either. Its configs compute the same values up to floating-point reduction
+    # order, so unless the caller requires tuned backward kernels, freeze the first
+    # static one that loaded, with tuning turned off, and report it as untuned. A
+    # source a forward instance shares is still refused: a forward no call ran
+    # means the capture missed a path serving may need.
+    def static_results(kernel: CachingAutotuner) -> list[StaticTritonCompileResult]:
+        # Only launchers: each loaded its binary, unlike a bare compile result, so
+        # replay cannot fail to load the one frozen here. A launcher Triton built
+        # itself, not statically, has no _compile_result.
+        return [
+            result
+            for launcher in kernel.launchers
+            if isinstance(
+                result := getattr(launcher, "_compile_result", None),
+                StaticTritonCompileResult,
+            )
+        ]
+
+    never_run_backward = (
+        bool(instances)
+        and not any(kernel._forward_use for kernel in instances)
+        and not any(kernel._launched for kernel in instances)
+    )
+    static_by_instance = []
+    for kernel in instances:
+        with kernel.lock:
+            static_by_instance.append(static_results(kernel))
+    if never_run_backward and not require_tuned_backward:
+        for kernel, static in zip(instances, static_by_instance):
+            if not static:
+                continue
+            with kernel.lock:
+                saved, saved_result = _detached_for_freeze(kernel, static[0])
+                kernel_name = kernel.inductor_meta.get("kernel_name")
+                compile_id = getattr(kernel, "compile_id", None)
+                compile_id = str(compile_id) if compile_id is not None else None
+            saved.inductor_meta = {
+                **saved.inductor_meta,
+                "coordinate_descent_tuning": False,
+                "combo_tuning_groups": None,
+            }
+            payload = _pickle_frozen_triton_kernel(key, kernel, saved, saved_result)
+            if not isinstance(payload, bytes):
+                reject(kernel, payload)
+                continue
+            return payload, {
+                "source_key": key,
+                "kernel_name": kernel_name,
+                "compile_id": compile_id,
+                "direction": "backward",
+                "static_config_count": len(static),
+            }
+
+    def cubin_retained(
+        kernel: CachingAutotuner, result: StaticTritonCompileResult
+    ) -> bool:
+        with kernel.lock:
+            _, saved_result = _detached_for_freeze(kernel, result)
         try:
             _retain_cubin(saved_result)
-        except (OSError, RuntimeError) as exc:
-            with kernel.lock:
-                diagnostic = _triton_export_diagnostic(kernel, "cubin_unavailable")
-            diagnostic["error"] = str(exc)
-            rejected.append(diagnostic)
-            continue
-        return pickle.dumps(
-            StaticallyLaunchedAutotuner(
-                key, saved.inductor_meta.get("kernel_name", "unknown_kernel"), saved
-            )
+        except (OSError, RuntimeError):
+            return False
+        return True
+
+    # Whether DynamoTracer(require_tuned_backward=False) would freeze it.
+    eligible = (
+        require_tuned_backward
+        and never_run_backward
+        and any(
+            static and cubin_retained(kernel, static[0])
+            for kernel, static in zip(instances, static_by_instance)
         )
-    kernel_name = instances[0].inductor_meta.get("kernel_name")
+    )
+    kernel_name = instances[0].inductor_meta.get("kernel_name") if instances else None
     raise _UnresolvedTritonExport(
         [
             {
@@ -477,6 +606,7 @@ def _freeze_triton_kernel(key: str, instances: list[CachingAutotuner]) -> bytes:
                 "kernel_name": kernel_name,
                 "instance_count": len(instances),
                 "instances": rejected,
+                "untuned_backward_eligible": eligible,
             }
         ]
     )
@@ -621,14 +751,22 @@ def capture_scope() -> Iterator[None]:
                     _capture = None
 
 
-def _freeze_triton_kernels(kernels: dict[str, list[CachingAutotuner]]) -> bytes:
+def _freeze_triton_kernels(
+    kernels: dict[str, list[CachingAutotuner]], *, require_tuned_backward: bool
+) -> tuple[bytes, list[dict[str, object]]]:
+    """The frozen kernels, and the report of each one frozen untuned."""
     from torch._logging import trace_structured
 
     static_kernels: dict[str, bytes] = {}
     rejected_sources: list[dict[str, object]] = []
+    untuned: list[dict[str, object]] = []
     for key, instances in kernels.items():
         try:
-            static_kernels[key] = _freeze_triton_kernel(key, instances)
+            static_kernels[key], report = _freeze_triton_kernel(
+                key, instances, require_tuned_backward=require_tuned_backward
+            )
+            if report is not None:
+                untuned.append(report)
         except _UnresolvedTritonExport as exc:
             rejected_sources.extend(exc.sources)
     if rejected_sources:
@@ -644,7 +782,32 @@ def _freeze_triton_kernels(kernels: dict[str, list[CachingAutotuner]]) -> bytes:
             record_logging_overhead=False,
         )
         raise error
-    return pickle.dumps(static_kernels)
+    return pickle.dumps(static_kernels), untuned
+
+
+def _report_untuned_triton_kernels(untuned: list[dict[str, object]]) -> None:
+    from torch._logging import trace_structured
+
+    # One warning for all of them: a training capture that ran no backward freezes
+    # every backward kernel this way.
+    names = [str(report["kernel_name"]) for report in untuned]
+    log.warning(
+        "precompile: no captured step ran %d backward Triton kernel(s), so they are "
+        "frozen untuned, each with the first of its static configs: %s. The "
+        "precompile_triton_untuned_kernels artifact lists them all.",
+        len(names),
+        ", ".join(names[:5]) + (", ..." if len(names) > 5 else ""),
+    )
+    trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": "precompile_triton_untuned_kernels",
+            "encoding": "json",
+        },
+        payload_fn=lambda: {"kernels": untuned},
+        expect_trace_id=False,
+        record_logging_overhead=False,
+    )
 
 
 def _current_root(cache: ModuleType) -> str | None:
@@ -655,7 +818,10 @@ def _current_root(cache: ModuleType) -> str | None:
 
 
 def freeze_runtime_cache(
-    snapshot: Callable[[], bytes | None], write: Callable[[bytes | None], None]
+    snapshot: Callable[[], bytes | None],
+    write: Callable[[bytes | None], None],
+    *,
+    require_tuned_backward: bool,
 ) -> None:
     """Freeze the scope's static Triton kernels, C++ kernel binaries and Triton
     JIT cache into the cache artifact and pass it to ``write``.
@@ -663,8 +829,11 @@ def freeze_runtime_cache(
     Every recorded C++ kernel is built before ``snapshot`` renders the
     artifact; every graph compile already waited on its own Triton kernels. A
     kernel that cannot be frozen raises, since precompile.load could not serve
-    it without compiling. The caller must stop compiling before calling this: a
-    kernel compiled on another thread meanwhile is neither waited on nor frozen.
+    it without compiling. The exception, unless ``require_tuned_backward``, is a
+    backward kernel no instance ever launched: it is frozen untuned, with its
+    first loaded static config, and reported. The caller must stop compiling
+    before calling this: a kernel compiled on another thread meanwhile is neither
+    waited on nor frozen.
     """
     owner = _active_capture()
     if owner is None:
@@ -699,7 +868,9 @@ def freeze_runtime_cache(
         with _capture_lock:
             kernels = {key: list(found) for key, found in owner.triton_kernels.items()}
             cpp_kernels = {key: path for key, (path, _) in owner.cpp_kernels.items()}
-        static_payload = _freeze_triton_kernels(kernels)
+        static_payload, untuned = _freeze_triton_kernels(
+            kernels, require_tuned_backward=require_tuned_backward
+        )
         cpp_payload = _freeze_cpp_kernels(cpp_kernels)
         if cache is not None:
             payload = cache.export_runtime_cache(context=_runtime_context())
@@ -719,3 +890,6 @@ def freeze_runtime_cache(
         serializer = AppendingByteSerializer(serialize_fn=_serialize_single_cache)
         serializer.extend(artifacts.items())
         write(serializer.to_bytes())
+        # Only once they are written, so a failed capture reports nothing as frozen.
+        if untuned:
+            _report_untuned_triton_kernels(untuned)
